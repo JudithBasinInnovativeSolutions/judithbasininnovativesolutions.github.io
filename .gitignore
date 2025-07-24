@@ -1,0 +1,3 @@
+# Ignore site’s build output
+/site/bin/
+/site/obj/
