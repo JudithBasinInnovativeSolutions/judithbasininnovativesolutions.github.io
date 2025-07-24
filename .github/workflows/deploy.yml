@@ -13,7 +13,7 @@ jobs:
       with:
         dotnet-version: '8.0.x'
     - name: Publish
-      run: dotnet publish src/CompanySite/CompanySite.fsproj -c Release -o release
+      run: dotnet publish site/site.fsproj -c Release -o release
     - name: Add .nojekyll
       run: touch release/wwwroot/.nojekyll
     - name: Rewrite base‑href (only needed for *project* sites)
