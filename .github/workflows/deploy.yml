@@ -1,0 +1,29 @@
+name: Build and deploy Fun.Blazor
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+    - name: Publish
+      run: dotnet publish src/CompanySite/CompanySite.fsproj -c Release -o release
+    - name: Add .nojekyll
+      run: touch release/wwwroot/.nojekyll
+    - name: Rewrite base‑href (only needed for *project* sites)
+      if: github.repository != 'JudithBasinInnovativeSolutions/judithbasininnovativesolutions.github.io'
+      uses: stevesandersonms/ghaction-rewrite-base-href@v1
+      with:
+        path: release/wwwroot
+        baseHref: "/${{ github.event.repository.name }}/"
+    - name: Deploy
+      uses: JamesIves/github-pages-deploy-action@v4
+      with:
+        folder: release/wwwroot
+        branch: gh-pages   # or 'main' if you publish from the default branch
