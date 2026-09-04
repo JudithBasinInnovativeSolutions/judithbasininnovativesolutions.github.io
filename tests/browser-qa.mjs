@@ -101,9 +101,33 @@ await checkRouteSet('mobile', { width: 390, height: 844 });
   const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const page = await context.newPage();
   let apiMode = 'failure';
+  const submissions = [];
+  // Deterministic widget simulation for recovery states; production challenge/inbox QA remains manual.
+  await page.route('https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit', (route) => route.fulfill({
+    contentType: 'application/javascript',
+    body: `(() => {
+      let host, options, token, sequence = 0;
+      window.turnstile = {
+        render(element, config) {
+          host = element; options = config; window.__qaTurnstile = config;
+          token = document.createElement('input'); token.type = 'hidden'; token.name = 'cf-turnstile-response'; host.append(token);
+          const button = document.createElement('button'); button.type = 'button'; button.textContent = 'Verify test visitor';
+          button.onclick = () => { token.value = 'test-token-' + (++sequence); options.callback(token.value); };
+          host.append(button); return 'qa-widget';
+        },
+        reset() { token.value = ''; window.__qaResets = (window.__qaResets || 0) + 1; },
+        remove() { host.replaceChildren(); }
+      };
+    })();`,
+  }));
   await page.route('**/api/contact', async (route) => {
+    submissions.push(route.request().postDataJSON());
     await new Promise((resolve) => setTimeout(resolve, 220));
-    if (apiMode === 'success') {
+    if (apiMode === 'network') {
+      await route.abort('failed');
+    } else if (apiMode === 'rate') {
+      await route.fulfill({ status: 429, contentType: 'application/json', body: JSON.stringify({ ok: false, message: 'Too many attempts. Please wait 60 seconds and try again.' }) });
+    } else if (apiMode === 'success') {
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true }) });
     } else {
       await route.fulfill({ status: 502, contentType: 'application/json', body: JSON.stringify({ ok: false, message: 'Your inquiry could not be delivered. Please try again.' }) });
@@ -111,15 +135,17 @@ await checkRouteSet('mobile', { width: 390, height: 844 });
   });
 
   await page.goto(`${baseUrl}/contact`, { waitUntil: 'domcontentloaded' });
-  await page.locator('.turnstile-host iframe').waitFor({ state: 'attached', timeout: 3_000 }).catch(() => undefined);
+  await page.getByRole('button', { name: 'Verify test visitor' }).waitFor();
   const turnstileWiring = await page.evaluate(() => ({
-    iframeCount: document.querySelectorAll('.turnstile-host iframe').length,
+    action: window.__qaTurnstile?.action,
     siteKey: document.querySelector('.turnstile-host')?.getAttribute('data-sitekey'),
     scriptPresent: Boolean(document.querySelector('script[src^="https://challenges.cloudflare.com/turnstile/"]')),
   }));
-  check(turnstileWiring.iframeCount === 1 || (turnstileWiring.siteKey === '1x00000000000000000000AA' && turnstileWiring.scriptPresent), 'Turnstile widget wiring is missing or invalid');
+  check(turnstileWiring.action === 'contact' && turnstileWiring.siteKey && turnstileWiring.scriptPresent, 'Turnstile widget wiring is missing or invalid');
+  check(await page.getByRole('button', { name: 'Send project inquiry', exact: true }).isDisabled(), 'Sending was enabled before verification');
+  await page.getByRole('button', { name: 'Verify test visitor' }).click();
 
-  await page.locator('#project-inquiry').evaluate((form) => form.requestSubmit());
+  await page.getByRole('button', { name: 'Send project inquiry', exact: true }).click();
   check(await page.locator('#name').evaluate((element) => element.matches(':invalid')), 'Empty required fields did not trigger browser validation');
 
   await page.locator('#name').fill('Preview Tester');
@@ -130,16 +156,60 @@ await checkRouteSet('mobile', { width: 390, height: 844 });
   await page.locator('#budget').selectOption('Not sure yet');
   await page.locator('#projectSummary').fill('This is a controlled browser test of the project inquiry states.');
 
-  await page.locator('#project-inquiry').evaluate((form) => form.requestSubmit());
+  await page.getByRole('button', { name: 'Send project inquiry', exact: true }).click();
   check(await page.getByRole('button', { name: 'Sending…' }).isDisabled(), 'The submit button was not disabled while the request was pending');
+  await page.locator('#project-inquiry').evaluate((form) => form.requestSubmit());
   await page.getByText('Your inquiry could not be delivered. Please try again.').waitFor();
   check(await page.locator('#name').inputValue() === 'Preview Tester', 'Form values were not retained after a recoverable failure');
+  check(submissions.length === 1, 'A duplicate submission was sent while pending');
+  check(await page.getByRole('button', { name: 'Send project inquiry', exact: true }).isDisabled(), 'An already-used token remained enabled after a provider failure');
+
+  apiMode = 'network';
+  await page.getByRole('button', { name: 'Verify test visitor' }).click();
+  await page.getByRole('button', { name: 'Send project inquiry', exact: true }).click();
+  await page.getByText(/We could not confirm delivery/).waitFor();
+  check(await page.locator('#name').inputValue() === 'Preview Tester', 'Form values were lost after a network error');
+
+  apiMode = 'rate';
+  await page.getByRole('button', { name: 'Verify test visitor' }).click();
+  await page.getByRole('button', { name: 'Send project inquiry', exact: true }).click();
+  await page.getByText(/Too many attempts/).waitFor();
+  check(await page.locator('#name').inputValue() === 'Preview Tester', 'Form values were lost after throttling');
+
+  await page.getByRole('button', { name: 'Verify test visitor' }).click();
+  await page.evaluate(() => window.__qaTurnstile['expired-callback']());
+  await page.getByText(/Verification expired/).waitFor();
+  check(await page.getByRole('button', { name: 'Send project inquiry', exact: true }).isDisabled(), 'Expired verification did not disable submission');
 
   apiMode = 'success';
-  await page.locator('#project-inquiry').evaluate((form) => form.requestSubmit());
+  await page.getByRole('button', { name: 'Verify test visitor' }).click();
+  await page.getByRole('button', { name: 'Send project inquiry', exact: true }).click();
   await page.getByText('Your inquiry was sent. Thank you for sharing what you’re building.').waitFor();
   check(await page.locator('#name').inputValue() === '', 'Form values were not cleared after success');
+  check(submissions.every((submission) => submission.inquiryId === submissions[0].inquiryId), 'Retry attempts did not preserve the inquiry ID');
+  check(new Set(submissions.map((submission) => submission.turnstileToken)).size === submissions.length, 'A retry reused a spent verification token');
   await page.screenshot({ path: join(artifactDirectory, 'mobile-contact-success.png'), fullPage: true });
+  await context.close();
+}
+
+{
+  const context = await browser.newContext({ javaScriptEnabled: false });
+  const page = await context.newPage();
+  await page.goto(`${baseUrl}/contact`);
+  await page.locator('noscript p').waitFor({ state: 'visible' });
+  check(await page.getByRole('button', { name: 'Send project inquiry', exact: true }).isDisabled(), 'The form could submit before JavaScript initialization');
+  check(await page.locator('#project-inquiry').getAttribute('method') === 'post', 'The pre-hydration form could expose fields through a GET URL');
+  check((await page.locator('noscript p').textContent()).includes('Please use the email address'), 'No-JavaScript email fallback is missing');
+  await context.close();
+}
+
+{
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.route('https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit', (route) => route.abort());
+  await page.goto(`${baseUrl}/contact`);
+  await page.getByText(/Verification could not load/).waitFor();
+  check(await page.getByRole('button', { name: 'Send project inquiry', exact: true }).isDisabled(), 'A blocked verification script did not fail closed');
   await context.close();
 }
 

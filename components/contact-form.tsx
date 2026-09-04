@@ -7,11 +7,12 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Textarea } from '@/components/ui/textarea';
+import { CONTACT_ACTION, CONTACT_TIMEOUT_MS } from '@/lib/contact-policy';
 
 declare global {
   interface Window {
     turnstile?: {
-      render: (container: HTMLElement, options: { sitekey: string; theme: 'dark' }) => string;
+      render: (container: HTMLElement, options: { sitekey: string; theme: 'dark'; action: string; callback: () => void; 'expired-callback': () => void; 'error-callback': () => void }) => string;
       reset: (widgetId?: string) => void;
       remove?: (widgetId: string) => void;
     };
@@ -28,18 +29,41 @@ export function ContactForm({ turnstileSiteKey }: { turnstileSiteKey: string }) 
   const formRef = useRef<HTMLFormElement>(null);
   const turnstileContainerRef = useRef<HTMLDivElement>(null);
   const turnstileWidgetIdRef = useRef<string | undefined>(undefined);
+  const inquiryIdRef = useRef<string | undefined>(undefined);
+  const pendingRef = useRef(false);
+  const [verified, setVerified] = useState(false);
   const [pending, setPending] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<ApiResponse['errors']>({});
   const [status, setStatus] = useState<{ kind: 'idle' | 'error' | 'success'; message: string }>({ kind: 'idle', message: '' });
 
   const errorFor = (field: keyof FieldErrors) => fieldErrors?.[field];
   useEffect(() => {
+    const verificationUnavailable = () => {
+      setVerified(false);
+      setStatus({ kind: 'error', message: 'Verification could not load. Please reload this page or use the email address shown here.' });
+    };
+    if (!turnstileSiteKey) {
+      setStatus({ kind: 'error', message: 'Project inquiries are temporarily unavailable. Please use the email address shown here.' });
+      return;
+    }
     const renderWidget = () => {
       if (window.turnstile && turnstileContainerRef.current && !turnstileWidgetIdRef.current) {
-        turnstileWidgetIdRef.current = window.turnstile.render(turnstileContainerRef.current, {
-          sitekey: turnstileSiteKey,
-          theme: 'dark',
-        });
+        try {
+          turnstileWidgetIdRef.current = window.turnstile.render(turnstileContainerRef.current, {
+            sitekey: turnstileSiteKey,
+            theme: 'dark',
+            action: CONTACT_ACTION,
+            callback: () => {
+              setVerified(true);
+              setStatus((previous) => previous.kind === 'error' && previous.message.startsWith('Verification') ? { kind: 'idle', message: '' } : previous);
+            },
+            'expired-callback': () => {
+              setVerified(false);
+              if (!pendingRef.current) setStatus({ kind: 'error', message: 'Verification expired. Complete the verification again; your entries are still here.' });
+            },
+            'error-callback': verificationUnavailable,
+          });
+        } catch { verificationUnavailable(); }
       }
     };
 
@@ -49,23 +73,29 @@ export function ContactForm({ turnstileSiteKey }: { turnstileSiteKey: string }) 
       renderWidget();
     } else if (script) {
       script.addEventListener('load', renderWidget, { once: true });
+      script.addEventListener('error', verificationUnavailable, { once: true });
     } else {
       script = document.createElement('script');
       script.src = scriptSource;
       script.async = true;
       script.defer = true;
       script.addEventListener('load', renderWidget, { once: true });
+      script.addEventListener('error', verificationUnavailable, { once: true });
       document.head.appendChild(script);
     }
 
+    const loadDeadline = setTimeout(() => { if (!turnstileWidgetIdRef.current) verificationUnavailable(); }, 10_000);
     return () => {
+      clearTimeout(loadDeadline);
       if (script) script.removeEventListener('load', renderWidget);
+      if (script) script.removeEventListener('error', verificationUnavailable);
       if (turnstileWidgetIdRef.current) window.turnstile?.remove?.(turnstileWidgetIdRef.current);
       turnstileWidgetIdRef.current = undefined;
     };
   }, [turnstileSiteKey]);
 
   const resetTurnstile = () => {
+    setVerified(false);
     try {
       window.turnstile?.reset(turnstileWidgetIdRef.current);
     } catch {
@@ -75,11 +105,17 @@ export function ContactForm({ turnstileSiteKey }: { turnstileSiteKey: string }) 
 
   async function submitInquiry(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (pending) return;
+    if (pendingRef.current) return;
     const form = event.currentTarget;
     if (!form.reportValidity()) return;
 
     const values = new FormData(form);
+    if (!verified || !values.get('cf-turnstile-response')) {
+      setStatus({ kind: 'error', message: 'Complete the verification before sending your inquiry.' });
+      return;
+    }
+    inquiryIdRef.current ??= crypto.randomUUID();
+    pendingRef.current = true;
     setPending(true);
     setFieldErrors({});
     setStatus({ kind: 'idle', message: 'Sending your inquiry…' });
@@ -88,7 +124,9 @@ export function ContactForm({ turnstileSiteKey }: { turnstileSiteKey: string }) 
       const response = await fetch('/api/contact', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
+        signal: AbortSignal.timeout(CONTACT_TIMEOUT_MS),
         body: JSON.stringify({
+          inquiryId: inquiryIdRef.current,
           name: values.get('name'),
           email: values.get('email'),
           organization: values.get('organization'),
@@ -104,26 +142,29 @@ export function ContactForm({ turnstileSiteKey }: { turnstileSiteKey: string }) 
 
       if (response.ok && result.ok) {
         form.reset();
-        resetTurnstile();
+        inquiryIdRef.current = undefined;
         setStatus({ kind: 'success', message: 'Your inquiry was sent. Thank you for sharing what you’re building.' });
         return;
       }
 
       setFieldErrors(result.errors || {});
-      if (response.status === 403) resetTurnstile();
       setStatus({
         kind: 'error',
         message: result.message || result.errors?.form || 'Please review the highlighted fields and try again.',
       });
     } catch {
-      setStatus({ kind: 'error', message: 'The form could not connect. Your entries are still here—please try again.' });
+      setStatus({ kind: 'error', message: 'We could not confirm delivery. Your entries are still here—please retry this inquiry or use the email address shown here.' });
     } finally {
+      // Siteverify consumes tokens even when the subsequent email request fails.
+      resetTurnstile();
+      pendingRef.current = false;
       setPending(false);
     }
   }
 
   return (
-    <form id="project-inquiry" ref={formRef} className="inquiry-form" onSubmit={submitInquiry} noValidate>
+    <form id="project-inquiry" method="post" action="/api/contact" ref={formRef} className="inquiry-form" onSubmit={submitInquiry} noValidate aria-busy={pending}>
+      <noscript><p>This form needs JavaScript for secure delivery. Please use the email address shown on this page.</p></noscript>
       <div className="form-grid">
         <div className="field">
           <label htmlFor="name">Name <span aria-hidden="true">*</span></label>
@@ -179,11 +220,11 @@ export function ContactForm({ turnstileSiteKey }: { turnstileSiteKey: string }) 
 
       <div className="verification-row">
         <div className="turnstile-host" ref={turnstileContainerRef} data-sitekey={turnstileSiteKey} />
-        <p>Protected by Cloudflare Turnstile. See our <a href="/privacy">privacy notice</a>.</p>
+        <p>Complete the verification to enable sending. Protected by Cloudflare Turnstile. See our <a href="/privacy">privacy notice</a>.</p>
       </div>
 
       <div className="submit-row">
-        <Button type="submit" disabled={pending} aria-disabled={pending}>
+        <Button type="submit" disabled={pending || !verified} aria-disabled={pending || !verified}>
           {pending ? 'Sending…' : 'Send project inquiry'} {!pending && <Send aria-hidden="true" size={17} />}
         </Button>
         <div className={`form-status ${status.kind}`} role="status" aria-live="polite" aria-atomic="true">

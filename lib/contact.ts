@@ -1,3 +1,6 @@
+import { CONTACT_ACTION, CONTACT_HOSTS, INQUIRY_ID_PATTERN, isTestHost, isTestKey } from './contact-policy';
+import { contactRateLimiter } from './contact-rate-limit';
+
 export const PROJECT_TYPES = [
   'Website',
   'Web application',
@@ -26,6 +29,7 @@ export type ContactData = {
   budget: (typeof BUDGETS)[number] | '';
   website: string;
   turnstileToken: string;
+  inquiryId: string;
 };
 
 export type FieldErrors = Partial<Record<keyof ContactData, string>>;
@@ -33,12 +37,17 @@ export type FieldErrors = Partial<Record<keyof ContactData, string>>;
 type ContactEnvironment = {
   RESEND_API_KEY?: string;
   TURNSTILE_SECRET_KEY?: string;
+  TURNSTILE_SITE_KEY?: string;
 };
 
 type ContactDependencies = {
   env: ContactEnvironment;
   fetcher?: typeof fetch;
+  rateLimiter?: (key: string) => number;
 };
+
+export const MAX_CONTACT_BYTES = 24_000;
+export const PROVIDER_TIMEOUT_MS = 8_000;
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
@@ -64,6 +73,7 @@ export function validateContactPayload(payload: unknown): { data?: ContactData; 
     budget: textValue(source.budget),
     website: textValue(source.website),
     turnstileToken: textValue(source.turnstileToken),
+    inquiryId: textValue(source.inquiryId),
   };
   const errors: FieldErrors = {};
 
@@ -74,6 +84,8 @@ export function validateContactPayload(payload: unknown): { data?: ContactData; 
   if (data.projectSummary.length < 20 || data.projectSummary.length > 3000) errors.projectSummary = 'Enter a project summary between 20 and 3,000 characters.';
   if (!TIMELINES.includes(data.timeline as ContactData['timeline'])) errors.timeline = 'Choose a timeline.';
   if (data.budget && !BUDGETS.includes(data.budget as Exclude<ContactData['budget'], ''>)) errors.budget = 'Choose a listed budget range or leave it blank.';
+  if (!INQUIRY_ID_PATTERN.test(data.inquiryId)) errors.inquiryId = 'Reload the form and try again.';
+  if (data.turnstileToken.length > 2048) errors.turnstileToken = 'Verification is invalid. Please try again.';
 
   return Object.keys(errors).length
     ? { errors }
@@ -131,10 +143,17 @@ async function verifyTurnstile(token: string, secret: string, request: Request, 
       method: 'POST',
       body,
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
     });
     if (!response.ok) return false;
-    const result = await response.json() as { success?: boolean };
-    return result.success === true;
+    const result = await response.json() as { success?: boolean; hostname?: string; action?: string };
+    if (result.success !== true) return false;
+    // Dummy response metadata varies (e.g. example.com with no action).
+    // Only the explicitly named private/local test hosts may use test keys.
+    if (isTestKey(secret) && isTestHost(new URL(request.url).hostname)) {
+      return true;
+    }
+    return result.hostname === new URL(request.url).hostname && result.action === CONTACT_ACTION;
   } catch {
     return false;
   }
@@ -142,24 +161,68 @@ async function verifyTurnstile(token: string, secret: string, request: Request, 
 
 function isSameOrigin(request: Request) {
   const origin = request.headers.get('origin');
-  return !origin || origin === new URL(request.url).origin;
+  return request.headers.get('sec-fetch-site') !== 'cross-site' && (!origin || origin === new URL(request.url).origin);
+}
+
+async function readBoundedJson(request: Request): Promise<unknown> {
+  const reader = request.body?.getReader();
+  if (!reader) throw new Error('Missing body');
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  // Bound slow/chunked uploads as well as requests with a Content-Length header.
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      (async () => {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          length += value.byteLength;
+          if (length > MAX_CONTACT_BYTES) throw new Error('Body too large');
+          chunks.push(value);
+        }
+        const bytes = new Uint8Array(length);
+        let offset = 0;
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+        return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      })(),
+      new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error('Body timeout')), PROVIDER_TIMEOUT_MS); }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+    void reader.cancel().catch(() => undefined);
+  }
+}
+
+async function digest(value: string) {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 export async function handleContactRequest(request: Request, dependencies: ContactDependencies) {
   if (request.method !== 'POST') return json(405, { ok: false, message: 'Method not allowed.' });
   if (!isSameOrigin(request)) return json(403, { ok: false, message: 'This submission could not be verified.' });
-  if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) {
+  const hostname = new URL(request.url).hostname;
+  if (!CONTACT_HOSTS.includes(hostname) && !isTestHost(hostname)) return json(403, { ok: false, message: 'This submission could not be verified.' });
+  if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') {
     return json(400, { ok: false, errors: { form: 'Send the inquiry as JSON.' } });
   }
 
   const declaredLength = Number(request.headers.get('content-length') || 0);
-  if (declaredLength > 24_000) return json(400, { ok: false, errors: { form: 'The inquiry is too large.' } });
+  if (declaredLength > MAX_CONTACT_BYTES) return json(400, { ok: false, errors: { form: 'The inquiry is too large.' } });
+
+  // CF-Connecting-IP must be supplied by the trusted hosting edge, not arbitrary forwarded headers.
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown-client';
+  const retryAfter = (dependencies.rateLimiter || contactRateLimiter)(await digest(ip));
+  if (retryAfter) return new Response(JSON.stringify({ ok: false, message: `Too many attempts. Please wait ${retryAfter} seconds and try again.` }), {
+    status: 429, headers: { ...JSON_HEADERS, 'retry-after': String(retryAfter) },
+  });
 
   let payload: unknown;
   try {
-    payload = await request.json();
+    payload = await readBoundedJson(request);
   } catch {
-    return json(400, { ok: false, errors: { form: 'The inquiry could not be read.' } });
+    return json(400, { ok: false, errors: { form: 'The inquiry could not be read or exceeded the size/time limit.' } });
   }
 
   const { data, errors } = validateContactPayload(payload);
@@ -167,8 +230,10 @@ export async function handleContactRequest(request: Request, dependencies: Conta
   if (data.website) return json(403, { ok: false, message: 'This submission could not be verified.' });
   if (!data.turnstileToken) return json(403, { ok: false, message: 'Complete the verification and try again.' });
 
-  const { RESEND_API_KEY: resendKey, TURNSTILE_SECRET_KEY: turnstileSecret } = dependencies.env;
-  if (!resendKey || !turnstileSecret) {
+  const { RESEND_API_KEY: resendKey, TURNSTILE_SECRET_KEY: turnstileSecret, TURNSTILE_SITE_KEY: siteKey } = dependencies.env;
+  if (!resendKey || !turnstileSecret || !siteKey ||
+      (isTestKey(turnstileSecret) !== isTestKey(siteKey)) ||
+      ((isTestKey(turnstileSecret) || isTestKey(siteKey)) && !isTestHost(hostname))) {
     return json(503, { ok: false, message: 'Project inquiries are temporarily unavailable. Please use the email address shown on this page.' });
   }
 
@@ -178,6 +243,9 @@ export async function handleContactRequest(request: Request, dependencies: Conta
   }
 
   const email = formatInquiry(data);
+  // Stable for the same form attempt and normalized email content, independent of the single-use bot token.
+  // Hashing also keeps inquiry contents out of the provider's idempotency header.
+  const idempotencyKey = `jbis/${await digest(JSON.stringify([data.inquiryId, data.email, email]))}`;
   let deliveryResponse: Response;
   try {
     deliveryResponse = await fetcher('https://api.resend.com/emails', {
@@ -185,7 +253,9 @@ export async function handleContactRequest(request: Request, dependencies: Conta
       headers: {
         authorization: `Bearer ${resendKey}`,
         'content-type': 'application/json',
+        'Idempotency-Key': idempotencyKey,
       },
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
       body: JSON.stringify({
         from: 'JBIS Website <website@mail.judithbasininnovativesolutions.com>',
         to: ['Allen.Simpson@JudithBasinInnovativeSolutions.com'],

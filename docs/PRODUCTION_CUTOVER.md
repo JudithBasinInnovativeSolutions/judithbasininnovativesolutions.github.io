@@ -2,6 +2,8 @@
 
 Production publication and domain changes require separate approval. Until then, keep `judithbasininnovativesolutions.com`, its GoDaddy site, and all DNS records unchanged.
 
+Start with [the owner account-setup guide](OWNER_SETUP.md). It separates safe preparation from the later approved DNS steps.
+
 ## 1. Prepare inquiry delivery
 
 - In the user-owned Resend account, add only `mail.judithbasininnovativesolutions.com` as the sending domain.
@@ -14,7 +16,7 @@ Production publication and domain changes require separate approval. Until then,
 
 - Create a production Cloudflare Turnstile widget for the approved production hostname.
 - Add the deployed private-preview hostname only if it is still needed for a controlled real-delivery test.
-- Store `TURNSTILE_SECRET_KEY` as a Sites secret and set `NEXT_PUBLIC_TURNSTILE_SITE_KEY` to the matching public site key.
+- Store `TURNSTILE_SECRET_KEY` as a Sites secret and set `TURNSTILE_SITE_KEY` to the matching public site key. This runtime variable replaces the old build-time `NEXT_PUBLIC_TURNSTILE_SITE_KEY`.
 - Replace the official test keys before production traffic is enabled.
 
 ## 3. Verify the complete private preview
@@ -22,6 +24,9 @@ Production publication and domain changes require separate approval. Until then,
 - Deploy a new private Sites version after the runtime values are configured.
 - Submit one clearly labeled test inquiry and confirm exactly one message arrives at `Allen.Simpson@JudithBasinInnovativeSolutions.com`.
 - Reply to the message and confirm Reply-To targets the visitor address used in the test.
+- Confirm the page serves the production public widget key, not a dummy key; server validation requires the exact page hostname and action `contact`.
+- Test a provider failure followed by a retry with a fresh bot token. Unchanged retries must use the same Resend idempotency key within its 24-hour retention window.
+- Confirm the trusted hosting edge preserves the visitor's `CF-Connecting-IP`. The application limiter is best-effort per Worker instance (5 attempts/minute), not distributed protection. Assess an edge rate-limiting policy with the hosting provider before public access; any extra account, binding, or DNS migration requires separate approval.
 - Recheck every route, navigation, metadata, assets, mobile layout, keyboard focus, 200% text zoom, and reduced-motion behavior.
 
 ## 4. Approve and connect the production domain

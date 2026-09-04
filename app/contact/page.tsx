@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { ContactForm } from '@/components/contact-form';
 import { PageHero } from '@/components/page-hero';
 import { COMPANY_EMAIL } from '@/lib/site';
+import { TEST_SITE_KEY } from '@/lib/contact-policy';
 
 export const metadata: Metadata = {
   title: 'Start a project',
@@ -9,9 +10,9 @@ export const metadata: Metadata = {
   alternates: { canonical: '/contact' },
 };
 
-const turnstileSiteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || '1x00000000000000000000AA';
-
 export default function ContactPage() {
+  // Runtime value: NEXT_PUBLIC_* values may be frozen into a local build.
+  const turnstileSiteKey = process.env.TURNSTILE_SITE_KEY || (process.env.NODE_ENV === 'development' ? TEST_SITE_KEY : '');
   return (
     <main id="main-content">
       <PageHero
