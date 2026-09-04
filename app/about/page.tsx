@@ -9,6 +9,12 @@ export const metadata: Metadata = {
   alternates: { canonical: '/about' },
 };
 
+const landscapes = [
+  { name: 'square-butte', alt: 'Golden fields rolling toward Square Butte in Judith Basin County, Montana', height: 949 },
+  { name: 'judith-river', alt: 'The South Fork Judith River flowing beside limestone cliffs and evergreen trees', height: 1080 },
+  { name: 'judith-peak', alt: 'Forested ridges and open country looking west from Judith Peak in the Judith Mountains', height: 1059 },
+];
+
 export default function AboutPage() {
   return (
     <main id="main-content">
@@ -20,10 +26,33 @@ export default function AboutPage() {
 
       <section className="section about-story">
         <div className="shell about-grid">
-          <div className="about-mark grid-field">
-            <img src="/brand/jbis-logo-512.webp" alt="JBIS bucking horse and circuit landscape logo" width="512" height="534" />
-            <p><MapPin aria-hidden="true" size={18} /> Built in Montana.<br />Ready to work remotely.</p>
-          </div>
+          <figure className="about-landscape">
+            <div className="landscape-grid">
+              {landscapes.map((photo, index) => (
+                <picture key={photo.name}>
+                  <img
+                    src={`/landscapes/${photo.name}-960.webp`}
+                    srcSet={[480, 960, 1440].map((width) => `/landscapes/${photo.name}-${width}.webp ${width}w`).join(', ')}
+                    sizes={index === 0 ? '(max-width: 800px) calc(100vw - 2rem), (max-width: 1216px) 45vw, 530px' : '(max-width: 800px) calc(50vw - 1.5rem), (max-width: 1216px) 22vw, 260px'}
+                    alt={photo.alt}
+                    width="1440"
+                    height={photo.height}
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </picture>
+              ))}
+            </div>
+            <figcaption>
+              <p className="landscape-caption"><MapPin aria-hidden="true" size={18} /> Built in Montana.<br />Ready to work remotely.</p>
+              <p className="landscape-credits">
+                <a href="https://www.flickr.com/photos/160831427@N06/39072540781/">Square Butte — USDA NRCS</a>;{' '}
+                <a href="https://www.flickr.com/photos/fsnorthernregion/14202115336/">South Fork Judith River — US Forest Service</a>{' '}
+                (<a href="https://creativecommons.org/licenses/by/2.0/">CC BY 2.0</a>);{' '}
+                <a href="https://www.flickr.com/photos/blm_mtdks/52456531611/">Judith Peak — Ann Boucher / BLM</a>. Resized and cropped.
+              </p>
+            </figcaption>
+          </figure>
           <div className="prose-column">
             <p className="eyebrow">Why JBIS</p>
             <h2>Technology should create movement, not another layer of friction.</h2>

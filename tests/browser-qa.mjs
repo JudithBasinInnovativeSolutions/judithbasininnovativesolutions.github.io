@@ -36,6 +36,25 @@ async function checkRouteSet(name, viewport) {
     check((await page.title()).includes('JBIS') || path === '/missing-route', `${name} ${path} has an unexpected title`);
     const dimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
     check(dimensions.scrollWidth <= dimensions.clientWidth + 1, `${name} ${path} has horizontal overflow (${dimensions.scrollWidth}/${dimensions.clientWidth})`);
+    if (path === '/about') {
+      await page.locator('.about-landscape').scrollIntoViewIfNeeded();
+      const photos = await page.locator('.landscape-grid img').evaluateAll(async (images) => {
+        await Promise.all(images.map((image) => image.decode()));
+        return images.map((image) => ({ loaded: image.complete && image.naturalWidth > 0, alt: image.alt, source: image.currentSrc }));
+      });
+      check(photos.length === 3 && photos.every((photo) => photo.loaded && photo.alt && photo.source.includes('/landscapes/')), `${name} About landscape photos are missing or broken`);
+      check(await page.locator('.landscape-credits a').count() === 4, `${name} About photo sources or license links are missing`);
+      await page.screenshot({ path: join(artifactDirectory, `${name}-about-landscapes.png`), fullPage: true });
+      await page.evaluate(() => { document.documentElement.style.fontSize = '200%'; });
+      const clipped = await page.locator('.about-story').evaluate((section) => [...section.querySelectorAll('p, h2, figure, img')].some((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.left < -1 || rect.right > innerWidth + 1 || element.scrollWidth > element.clientWidth + 1;
+      }));
+      check(!clipped, `${name} About photographs or text are clipped at 200% text size`);
+      await page.locator('.about-landscape').scrollIntoViewIfNeeded();
+      await page.screenshot({ path: join(artifactDirectory, `${name}-about-200-text.png`), fullPage: true });
+      await page.evaluate(() => { document.documentElement.style.fontSize = ''; });
+    }
   }
 
   await page.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded' });

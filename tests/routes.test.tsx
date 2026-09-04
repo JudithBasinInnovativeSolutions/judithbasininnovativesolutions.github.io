@@ -87,4 +87,21 @@ describe('site routes', () => {
       expect(source).not.toContain(forbidden);
     }
   });
+
+  it('uses local responsive landscape photos with source credits on About instead of a repeated logo', () => {
+    const markup = renderToStaticMarkup(createElement(AboutPage));
+    expect(markup).not.toContain('/brand/jbis-logo');
+    expect(markup).toContain('creativecommons.org/licenses/by/2.0/');
+    expect(markup).toContain('Ann Boucher / BLM');
+    expect(markup).toContain('Resized and cropped.');
+    for (const name of ['square-butte', 'judith-river', 'judith-peak']) {
+      for (const width of [480, 960, 1440]) {
+        const asset = `/landscapes/${name}-${width}.webp`;
+        expect(markup).toContain(asset);
+        const bytes = readFileSync(resolve('public', asset.slice(1)));
+        expect(new TextDecoder().decode(bytes.subarray(8, 12))).toBe('WEBP');
+      }
+    }
+    expect((markup.match(/loading="lazy"/g) || []).length).toBe(3);
+  });
 });
