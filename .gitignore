@@ -1,3 +1,12 @@
 # Ignore site’s build output
 /site/bin/
 /site/obj/
+/node_modules/
+/.next/
+/.vinext/
+/dist/
+/.wrangler/
+/.env
+/.env.*
+!.env.example
+*.tsbuildinfo
