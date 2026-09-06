@@ -12,7 +12,7 @@ import PrivacyPage, { metadata as privacyMetadata } from '@/app/privacy/page';
 import NotFound from '@/app/not-found';
 import robots from '@/app/robots';
 import sitemap from '@/app/sitemap';
-import nextConfig from '../next.config';
+import { middleware } from '../middleware';
 
 const pages = [
   ['home', HomePage],
@@ -24,13 +24,16 @@ const pages = [
 ] as const;
 
 describe('site routes', () => {
-  it('redirects only the WWW hostname to the canonical apex while preserving paths', async () => {
-    expect(await nextConfig.redirects?.()).toEqual([{
-      source: '/:path*',
-      has: [{ type: 'host', value: 'www\\.judithbasininnovativesolutions\\.com' }],
-      destination: 'https://judithbasininnovativesolutions.com/:path*',
-      permanent: true,
-    }]);
+  it('redirects WWW to the HTTPS apex while preserving paths and query parameters', () => {
+    const response = middleware(new Request('http://www.judithbasininnovativesolutions.com/services?source=launch&value=a%2Fb'));
+    expect(response?.status).toBe(308);
+    expect(response?.headers.get('location')).toBe('https://judithbasininnovativesolutions.com/services?source=launch&value=a%2Fb');
+  });
+
+  it('leaves the apex, private preview, and lookalike hostnames unchanged', () => {
+    for (const host of ['judithbasininnovativesolutions.com', 'jbis-software.allensimpson.chatgpt.site', 'www-judithbasininnovativesolutions.com', 'www.judithbasininnovativesolutions.com.example.org']) {
+      expect(middleware(new Request(`https://${host}/services`))).toBeUndefined();
+    }
   });
 
   it.each(pages)('renders the %s route with the shared navigation and footer', (_name, Page) => {

@@ -43,4 +43,6 @@ The application throttle is bounded and per Worker instance (5 attempts per 60 s
 
 ## Release status
 
-In progress. No production traffic switch is confirmed by this record yet. Record final DNS, TLS, route, redirect, and production inquiry results after verification.
+Ownership-verification TXT records for both apex and WWW were saved on September 6, 2026, and the hosting provider reports ownership active. Certificate status remains `pending_validation`; Sites has not supplied usable certificate-validation TXT details. A direct TLS check against the new edge fails before the traffic switch.
+
+No website-routing DNS or public-access change has been made. The existing GoDaddy site remains live. Automatic HTTP certificate validation requires the website DNS to point to the new host, which can introduce a temporary HTTPS interruption. Pause for owner approval of that risk or obtain a pre-issued certificate validation method from Sites before proceeding. Record final DNS, TLS, route, redirect, and production inquiry results after verification.
