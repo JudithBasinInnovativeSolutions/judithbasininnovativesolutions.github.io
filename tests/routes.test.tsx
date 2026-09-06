@@ -12,6 +12,7 @@ import PrivacyPage, { metadata as privacyMetadata } from '@/app/privacy/page';
 import NotFound from '@/app/not-found';
 import robots from '@/app/robots';
 import sitemap from '@/app/sitemap';
+import nextConfig from '../next.config';
 
 const pages = [
   ['home', HomePage],
@@ -23,6 +24,15 @@ const pages = [
 ] as const;
 
 describe('site routes', () => {
+  it('redirects only the WWW hostname to the canonical apex while preserving paths', async () => {
+    expect(await nextConfig.redirects?.()).toEqual([{
+      source: '/:path*',
+      has: [{ type: 'host', value: 'www\\.judithbasininnovativesolutions\\.com' }],
+      destination: 'https://judithbasininnovativesolutions.com/:path*',
+      permanent: true,
+    }]);
+  });
+
   it.each(pages)('renders the %s route with the shared navigation and footer', (_name, Page) => {
     const markup = renderToStaticMarkup(createElement(RootLayout, null, createElement(Page)));
     expect(markup).toContain('Judith Basin Innovative Solutions');
